@@ -8,10 +8,10 @@ class Trader:
         result = {}
 
         emerald_trader = EmeraldTrader('EMERALDS', state)
-        #tomato_trader = TomatoesTrader('TOMATOES', state)
+        tomato_trader = TomatoesTrader('TOMATOES', state)
 
         result["EMERALDS"] = emerald_trader.get_orders()
-        #result["TOMATOES"] = tomato_trader.get_orders()
+        result["TOMATOES"] = tomato_trader.get_orders()
 
         conversions = 0
         traderData = ""
@@ -57,7 +57,7 @@ class ProductTrader:
         market_bid_volume = market_ask_volume = 0
         try:
             market_bid_volume = sum([v for p, v in self.order_depth.buy_orders.items()])
-            market_ask_volume = sum([v for p, v in self.order_depth.sell_orders.items()])
+            market_ask_volume = sum([abs(v) for p, v in self.order_depth.sell_orders.items()])
         except: pass
         return market_bid_volume, market_ask_volume
 
@@ -85,4 +85,34 @@ class EmeraldTrader(ProductTrader):
 
         return self.orders
 
-# class TomatoesTrader(ProductTrader):
+class TomatoesTrader(ProductTrader):
+    def __init__(self, name, state):
+        super().__init__(name, state)
+        self.fair_value = int((self.best_bid + self.best_ask) / 2)
+        self.scaling_factor = 10
+    
+    def get_orders(self):
+        for order in self.order_depth.sell_orders.items():
+            if (order[0] < self.fair_value):
+                self.buy(order[0], abs(order[1]))
+            if (order[0] == self.fair_value and self.position < 0):
+                self.buy(order[0], min(abs(order[1]), abs(self.position)))
+
+        for order in self.order_depth.buy_orders.items():
+            if (order[0] > self.fair_value):
+                self.sell(order[0], order[1])
+            if (order[0] == self.fair_value and self.position > 0):
+                self.sell(order[0], min(abs(order[1]), abs(self.position)))
+        
+        half_spread = max(int((self.best_ask - self.best_bid) / 2) - 1, 3)
+        bid_vol, ask_vol = self.get_total_volumes()
+        if (bid_vol + ask_vol) == 0:
+            imbalance = 0
+        else:
+            imbalance = (bid_vol - ask_vol) / (bid_vol + ask_vol)
+        adjusted_fair = int(self.fair_value - (imbalance * self.scaling_factor))
+
+        self.buy(adjusted_fair - half_spread, self.buy_limit)
+        self.sell(adjusted_fair + half_spread, self.sell_limit)
+
+        return self.orders
