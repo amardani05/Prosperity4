@@ -1,4 +1,4 @@
-import json 
+import json
 from json import JSONEncoder
 from typing import Dict, List
 
@@ -28,7 +28,7 @@ class ConversionObservation:
         exportTariff: float,
         importTariff: float,
         sugarPrice: float,
-        sunlightIndesoftoat,
+        sunlightIndex: float,
     ):
         self.bidPrice = bidPrice
         self.askPrice = askPrice
