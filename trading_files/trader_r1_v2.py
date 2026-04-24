@@ -1,162 +1,119 @@
 from datamodel import OrderDepth, TradingState, Order
- 
-POS_LIMITS = {
-    'ASH_COATED_OSMIUM': 50,
-    'INTARIAN_PEPPER_ROOT': 50,
-}
- 
+import json
+
+
 class Trader:
-    def __init__(self):
-        pass
- 
-    def run(self, state):
+    def run(self, state: TradingState):
+        data = {}
+        if state.traderData:
+            try:
+                data = json.loads(state.traderData)
+            except Exception:
+                data = {}
+
         result = {}
 
-        try:
-            osmium_trader = OsmiumTrader('ASH_COATED_OSMIUM', state)
-            result['ASH_COATED_OSMIUM'] = osmium_trader.get_orders()
-        except Exception as e:
-            print(f"OSMIUM ERROR: {e}")
-            result['ASH_COATED_OSMIUM'] = []
+        if "ASH_COATED_OSMIUM" in state.order_depths:
+            result["ASH_COATED_OSMIUM"] = OsmiumTrader("ASH_COATED_OSMIUM", state).get_orders()
 
-        try:
-            pepper_root_trader = PepperRootTrader('INTARIAN_PEPPER_ROOT', state)
-            result['INTARIAN_PEPPER_ROOT'] = pepper_root_trader.get_orders()
-        except Exception as e:
-            print(f"PEPPER ERROR: {e}")
-            result['INTARIAN_PEPPER_ROOT'] = []
- 
-        conversions = 0
-        traderData = ""
-        return result, conversions, traderData
- 
+        if "INTARIAN_PEPPER_ROOT" in state.order_depths:
+            result["INTARIAN_PEPPER_ROOT"] = PepperTrader("INTARIAN_PEPPER_ROOT", state).get_orders()
+
+        return result, 0, json.dumps(data)
+
+
 class ProductTrader:
-    def __init__(self, name, state):
+    def __init__(self, name: str, state: TradingState, position_limit: int = 50):
         self.name = name
-        self.state = state
- 
-        self.position = self.state.position.get(self.name, 0)
-        if self.name in self.state.order_depths:
-            self.order_depth = self.state.order_depths[self.name]
-        else:
-            self.order_depth = OrderDepth()
+        self.position_limit = position_limit
+        self.position = state.position.get(name, 0)
+        self.order_depth: OrderDepth = state.order_depths[name]
         self.orders = []
- 
-        if self.order_depth.buy_orders and self.order_depth.sell_orders:
-            self.best_bid = max(self.order_depth.buy_orders.keys())
-            self.best_ask = min(self.order_depth.sell_orders.keys())
-        else:
-            self.best_bid = None
-            self.best_ask = None
- 
-        self.position_limit = POS_LIMITS.get(name, 80)
-        self.buy_limit = self.position_limit - self.position
-        self.sell_limit = self.position_limit + self.position
- 
-    def buy(self, price, volume):
-        if self.buy_limit <= 0 or volume <= 0:
+        self.buy_capacity = position_limit - self.position
+        self.sell_capacity = position_limit + self.position
+
+        bids = self.order_depth.buy_orders
+        asks = self.order_depth.sell_orders
+        self.best_bid = max(bids) if bids else None
+        self.best_ask = min(asks) if asks else None
+        self.mid = (
+            (self.best_bid + self.best_ask) / 2
+            if self.best_bid is not None and self.best_ask is not None
+            else None
+        )
+
+    def buy(self, price: int, volume: int):
+        if self.buy_capacity <= 0 or volume <= 0:
             return
-        actual_volume = min(volume, self.buy_limit)
-        self.orders.append(Order(self.name, int(price), actual_volume))
-        self.buy_limit -= actual_volume
- 
-    def sell(self, price, volume):
-        if self.sell_limit <= 0 or volume <= 0:
+        vol = min(volume, self.buy_capacity)
+        self.orders.append(Order(self.name, int(price), vol))
+        self.buy_capacity -= vol
+
+    def sell(self, price: int, volume: int):
+        if self.sell_capacity <= 0 or volume <= 0:
             return
-        actual_volume = min(volume, self.sell_limit)
-        self.orders.append(Order(self.name, int(price), -actual_volume))
-        self.sell_limit -= actual_volume
- 
-    def get_total_volumes(self):
-        market_bid_volume = market_ask_volume = 0
-        if self.order_depth.buy_orders:
-            market_bid_volume = sum(v for p, v in self.order_depth.buy_orders.items())
-        if self.order_depth.sell_orders:
-            market_ask_volume = sum(abs(v) for p, v in self.order_depth.sell_orders.items())
-        return market_bid_volume, market_ask_volume
- 
- 
+        vol = min(volume, self.sell_capacity)
+        self.orders.append(Order(self.name, int(price), -vol))
+        self.sell_capacity -= vol
+
+
 class OsmiumTrader(ProductTrader):
     """
-    Static asset ~10,000. Spread 16. Same as EMERALDS.
-    Take anything mispriced, penny the book, skew by position.
+    Mean-reverting around 10000. Spread ~16.
+    Take crosses, penny the book, skew by position with floor.
     """
+    FAIR_VALUE = 10000
+    SKEW_FACTOR = 8
+
     def __init__(self, name, state):
-        super().__init__(name, state)
-        self.fair_value = int((self.best_bid + self.best_ask) / 2)
-        self.skew_factor = 10
- 
+        super().__init__(name, state, position_limit=50)
+
     def get_orders(self):
         if self.best_bid is None or self.best_ask is None:
             return self.orders
- 
-        # Take mispriced orders — sweep all levels
-        for price, qty in sorted(self.order_depth.sell_orders.items()):
-            if price < self.fair_value:
-                self.buy(price, abs(qty))
-            elif price == self.fair_value and self.position < 0:
-                self.buy(price, min(abs(qty), abs(self.position)))
- 
-        for price, qty in sorted(self.order_depth.buy_orders.items(), reverse=True):
-            if price > self.fair_value:
-                self.sell(price, qty)
-            elif price == self.fair_value and self.position > 0:
-                self.sell(price, min(qty, self.position))
- 
-        skew = self.position // self.skew_factor
- 
-        passive_bid = min(self.fair_value - 1, self.best_bid + 1) - skew
-        passive_ask = max(self.fair_value + 1, self.best_ask - 1) - skew
- 
-        passive_bid = min(passive_bid, self.fair_value - 1)
-        passive_ask = max(passive_ask, self.fair_value + 1)
- 
-        self.buy(passive_bid, self.buy_limit)
-        self.sell(passive_ask, self.sell_limit)
+
+        fv = self.FAIR_VALUE
+
+        # Take mispriced orders
+        for price in sorted(self.order_depth.sell_orders):
+            if price < fv:
+                self.buy(price, abs(self.order_depth.sell_orders[price]))
+            elif price == fv and self.position < 0:
+                self.buy(price, min(abs(self.order_depth.sell_orders[price]), abs(self.position)))
+
+        for price in sorted(self.order_depth.buy_orders, reverse=True):
+            if price > fv:
+                self.sell(price, self.order_depth.buy_orders[price])
+            elif price == fv and self.position > 0:
+                self.sell(price, min(self.order_depth.buy_orders[price], self.position))
+
+        # Passive quotes with inventory skew
+        skew = self.position // self.SKEW_FACTOR
+
+        if self.buy_capacity > 0:
+            bid = min(self.best_bid + 1, fv - 1) - skew
+            bid = min(bid, fv - 1)  # never bid at or above fair
+            self.buy(bid, self.buy_capacity)
+
+        if self.sell_capacity > 0:
+            ask = max(self.best_ask - 1, fv + 1) - skew
+            ask = max(ask, fv - 3)  # floor: never sell below fv-3
+            self.sell(ask, self.sell_capacity)
 
         return self.orders
- 
- 
-class PepperRootTrader(ProductTrader):
-    """
-    Drifting asset, ~1000/day upward trend. Spread 11-14.
-    Dynamic fair value from book mid. Imbalance skew. Aggressive spreads.
-    """
+
+
+class PepperTrader(ProductTrader):
     def __init__(self, name, state):
-        super().__init__(name, state)
-        if self.best_bid is not None and self.best_ask is not None:
-            self.fair_value = int((self.best_bid + self.best_ask) / 2) + 5
-        else:
-            self.fair_value = None
-        self.scaling_factor = 10
- 
+        super().__init__(name, state, position_limit=50)
+
     def get_orders(self):
-        if self.best_bid is None or self.best_ask is None or self.fair_value is None:
-            return self.orders
- 
-        for price, qty in sorted(self.order_depth.sell_orders.items()):
-            if price < self.fair_value:
-                self.buy(price, abs(qty))
-            elif price == self.fair_value and self.position < 0:
-                self.buy(price, min(abs(qty), abs(self.position)))
- 
-        for price, qty in sorted(self.order_depth.buy_orders.items(), reverse=True):
-            if price > self.fair_value:
-                self.sell(price, qty)
-            elif price == self.fair_value and self.position > 0:
-                self.sell(price, min(qty, self.position))
- 
-        half_spread = max(int((self.best_ask - self.best_bid) / 2) - 1, 2)
- 
-        bid_vol, ask_vol = self.get_total_volumes()
-        if (bid_vol + ask_vol) == 0:
-            imbalance = 0
-        else:
-            imbalance = (bid_vol - ask_vol) / (bid_vol + ask_vol)
- 
-        adjusted_fair = int(self.fair_value - (imbalance * self.scaling_factor))
- 
-        self.buy(adjusted_fair - half_spread, self.buy_limit)
-        self.sell(adjusted_fair + half_spread, self.sell_limit)
- 
+        for price in sorted(self.order_depth.sell_orders):
+            if self.buy_capacity <= 0:
+                break
+            self.buy(price, abs(self.order_depth.sell_orders[price]))
+
+        if self.buy_capacity > 0 and self.best_bid is not None:
+            self.buy(self.best_bid + 1, self.buy_capacity)
+
         return self.orders
